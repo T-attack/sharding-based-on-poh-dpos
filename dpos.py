@@ -5,6 +5,8 @@ import time
 import asyncio
 from network import P2PNetwork, NetworkMessage
 from blockchain import Block, Blockchain
+import psutil
+import statistics
 
 @dataclass
 class Validator:
@@ -22,6 +24,23 @@ class Vote:
     candidate: str       # 候选人地址
     amount: float        # 投票数量
     timestamp: float     # 投票时间
+
+@dataclass
+class BlockMetrics:
+    """区块性能指标"""
+    block_height: int
+    transactions_count: int
+    creation_time: float
+    confirmation_time: float
+    validator: str
+    
+@dataclass
+class SystemMetrics:
+    """系统资源指标"""
+    cpu_usage: float
+    memory_usage: float
+    network_io: Dict[str, int]
+    timestamp: float
 
 class DPOS:
     def __init__(self, 
@@ -266,6 +285,49 @@ class BlockConfirmation:
             return 0
         return len(self.block_votes[block_hash])
 
+class PerformanceMonitor:
+    def __init__(self):
+        self.block_metrics: List[BlockMetrics] = []
+        self.system_metrics: List[SystemMetrics] = []
+        self.transaction_latencies: List[float] = []
+        self.start_time = time.time()
+        
+    def record_block_metrics(self, block_metrics: BlockMetrics):
+        self.block_metrics.append(block_metrics)
+        
+    def record_transaction_latency(self, latency: float):
+        self.transaction_latencies.append(latency)
+        
+    def collect_system_metrics(self):
+        metrics = SystemMetrics(
+            cpu_usage=psutil.cpu_percent(),
+            memory_usage=psutil.Process().memory_info().rss / 1024 / 1024,  # MB
+            network_io=psutil.net_io_counters()._asdict(),
+            timestamp=time.time()
+        )
+        self.system_metrics.append(metrics)
+        
+    def calculate_tps(self) -> float:
+        """计算每秒交易处理量"""
+        total_transactions = sum(m.transactions_count for m in self.block_metrics)
+        total_time = time.time() - self.start_time
+        return total_transactions / total_time if total_time > 0 else 0
+        
+    def get_average_latency(self) -> float:
+        """计算平均交易延迟"""
+        return statistics.mean(self.transaction_latencies) if self.transaction_latencies else 0
+        
+    def generate_report(self) -> dict:
+        """生成性能报告"""
+        return {
+            "tps": self.calculate_tps(),
+            "average_latency": self.get_average_latency(),
+            "avg_cpu_usage": statistics.mean(m.cpu_usage for m in self.system_metrics),
+            "avg_memory_usage": statistics.mean(m.memory_usage for m in self.system_metrics),
+            "block_count": len(self.block_metrics),
+            "total_transactions": sum(m.transactions_count for m in self.block_metrics)
+        }
+
 class ConsensusSystem:
     """完整的共识系统"""
     def __init__(self, poh, dpos):
@@ -275,9 +337,11 @@ class ConsensusSystem:
         self.fork_choice = ForkChoice()
         self.confirmation = BlockConfirmation()
         self.blockchain = Blockchain()
+        self.performance_monitor = PerformanceMonitor()
 
     def create_block(self, validator: str, transactions: List[str]) -> Block:
         """创建新区块"""
+        start_time = time.time()
         latest_block = self.blockchain.get_latest_block()
         poh_hash = self.poh.tick(str(transactions)).hash
         
@@ -291,6 +355,15 @@ class ConsensusSystem:
             poh_hash=poh_hash
         )
         
+        # 记录区块指标
+        metrics = BlockMetrics(
+            block_height=block.height,
+            transactions_count=len(transactions),
+            creation_time=time.time() - start_time,
+            confirmation_time=0,  # 将在确认时更新
+            validator=validator
+        )
+        self.performance_monitor.record_block_metrics(metrics)
         self.blockchain.add_block(block)
         return block
 

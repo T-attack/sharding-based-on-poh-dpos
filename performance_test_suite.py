@@ -30,7 +30,7 @@ class PerformanceTestSuite:
         ]
         self.results: Dict[str, dict] = {}
 
-    async def run_all_tests(self):
+    def run_all_tests(self):
         print("开始性能测试套件...")
         total_scenarios = len(self.scenarios)
         
@@ -46,7 +46,7 @@ class PerformanceTestSuite:
             
             # 运行测试并收集结果
             start_time = time.time()
-            await tester.run_test()
+            tester.run_test()
             duration = time.time() - start_time
             
             # 保存结果
@@ -67,8 +67,8 @@ class PerformanceTestSuite:
                 print("系统冷却中...")
                 for j in range(5, 0, -1):
                     print(f"\r休息 {j} 秒", end="")
-                    await asyncio.sleep(1)
-                print("\r" + " " * 20 + "\r", end="")  # 清除倒计时
+                    time.sleep(1)
+                print("\r" + " " * 20 + "\r", end="")
             
         self.print_summary()
 
@@ -132,11 +132,11 @@ class PerformanceTestSuite:
         base_tps = self.results["基准测试"]["metrics"]["tps"]
         large_validator_tps = self.results["大规模验证者"]["metrics"]["tps"]
         if large_validator_tps < base_tps * 0.8:
-            print("3. 验证者数量增加显著影响性能，建议优化共识机制")
+            print("3. 验证者数量增加显著影响性能，建议优化共���机制")
 
 async def main():
     suite = PerformanceTestSuite()
-    await suite.run_all_tests()
+    suite.run_all_tests()
 
 if __name__ == "__main__":
-    asyncio.run(main()) 
+    main() 

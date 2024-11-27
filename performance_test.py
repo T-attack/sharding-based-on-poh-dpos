@@ -23,12 +23,12 @@ class PerformanceTester:
         print("\n正在停止测试...")
         self.is_running = False
                 
-    async def generate_transactions(self) -> List[str]:
+    def generate_transactions(self) -> List[str]:
         """生成测试交易"""
         return [f"tx_{i}_{random.randint(0, 1000000)}" 
                 for i in range(self.batch_size)]
                 
-    async def run_test(self):
+    def run_test(self):
         """运行性能测试"""
         # 初始化系统
         poh = ProofOfHistory(difficulty=3)
@@ -49,7 +49,7 @@ class PerformanceTester:
         
         try:
             while processed_tx < self.transaction_count and self.is_running:
-                transactions = await self.generate_transactions()
+                transactions = self.generate_transactions()
                 validator = dpos.get_next_block_validator()
                 block_start = time.time()
                 block = self.consensus.create_block(validator, transactions)
@@ -61,7 +61,7 @@ class PerformanceTester:
                 processed_tx += len(transactions)
                 print(f"\r进度: {processed_tx}/{self.transaction_count} 交易", end="")
                 
-                await asyncio.sleep(dpos.block_interval)
+                time.sleep(dpos.block_interval)
                 
         except KeyboardInterrupt:
             print("\n检测到用户中断...")

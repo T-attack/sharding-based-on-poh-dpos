@@ -7,6 +7,9 @@ from network import P2PNetwork, NetworkMessage
 from blockchain import Block, Blockchain
 import psutil
 import statistics
+from time_sharding import TimeShardingManager, Shard, TimeSlot
+from shard_manager import ShardManager
+from cross_shard import CrossShardMessage, CrossShardManager
 
 @dataclass
 class Validator:
@@ -121,7 +124,7 @@ class DPOS:
             reverse=True
         )
         
-        # 选择前 max_validators 个作为活跃验证者
+        # 选择前 max_validators 个为活跃验证者
         self.active_validators.clear()
         for validator in sorted_validators[:self.max_validators]:
             validator.is_active = True
@@ -132,18 +135,16 @@ class DPOS:
             validator.is_active = False
 
     def get_next_block_validator(self) -> str:
-        """
-        获取下一个出块验证者
-        """
-        current_time = time.time()
-        active_list = list(self.active_validators)
+        """获取下一个区块验证者"""
+        # 从活跃验证者中选择一个
+        active_validators = list(self.active_validators)
+        if not active_validators:
+            return "validator_0"  # 默认验证者
         
-        if not active_list:
-            return ""
-            
-        # 简单的轮询算法
-        slot = int(current_time / self.block_interval) % len(active_list)
-        return active_list[slot]
+        # 使用轮询方式选择验证者
+        current_time = time.time()
+        validator_index = int(current_time / self.block_interval) % len(active_validators)
+        return active_validators[validator_index]
 
 class POHWithDPOS:
     """
@@ -156,7 +157,7 @@ class POHWithDPOS:
 
     def produce_block(self, validator_address: str, transactions: List[str]) -> bool:
         """
-        生成新区块
+        生成区块
         """
         if validator_address not in self.dpos.active_validators:
             return False
@@ -206,6 +207,18 @@ class ForkChoice:
     def __init__(self):
         self.chains: Dict[str, List[Block]] = {}  # 不同的链
         self.head: str = ""  # 当前最长链的ID
+        self.current_height: int = 0  # 当前高度
+        
+    def get_height(self) -> int:
+        """获取当前链高度"""
+        return self.current_height
+        
+    def get_head_hash(self) -> str:
+        """获取当前链头的哈希"""
+        if not self.head or not self.chains.get(self.head):
+            return "0" * 64
+        chain = self.chains[self.head]
+        return chain[-1].hash if chain else "0" * 64
         
     def add_block(self, block: Block) -> bool:
         """添加新区块，处理可能的分叉"""
@@ -216,6 +229,10 @@ class ForkChoice:
             
         self.chains[chain_id].append(block)
         
+        # 更新高度
+        if block.height > self.current_height:
+            self.current_height = block.height
+            
         # 选择最长的有效链
         self.select_best_chain()
         return True
@@ -329,64 +346,42 @@ class PerformanceMonitor:
         }
 
 class ConsensusSystem:
-    """完整的共识系统"""
-    def __init__(self, poh, dpos):
+    """分片共识系统"""
+    def __init__(self, poh, dpos, shard_id):
         self.poh = poh
         self.dpos = dpos
+        self.shard_id = shard_id
         self.network = P2PNetwork()
         self.fork_choice = ForkChoice()
         self.confirmation = BlockConfirmation()
         self.blockchain = Blockchain()
         self.performance_monitor = PerformanceMonitor()
-
-    def create_block(self, validator: str, transactions: List[str]) -> Block:
-        """创建新区块"""
-        start_time = time.time()
-        latest_block = self.blockchain.get_latest_block()
-        poh_hash = self.poh.tick(str(transactions)).hash
         
+    def create_block(self, validator: str, transactions: List) -> Block:
+        """创建区块"""
+        latest_block = self.blockchain.get_latest_block()
+        height = latest_block.height + 1 if latest_block else 0
+        previous_hash = latest_block.hash if latest_block else "0" * 64
+        
+        # 使用 tick 方法记录交易
+        poh_node = self.poh.tick(str(transactions))
+        
+        # 生成区块
         block = Block(
-            height=latest_block.height + 1 if latest_block else 0,
+            height=height,
             timestamp=time.time(),
-            previous_hash=latest_block.hash if latest_block else "0" * 64,
             transactions=transactions,
+            previous_hash=previous_hash,
             validator=validator,
             signature="",  # 需要验证者签名
-            poh_hash=poh_hash
+            poh_hash=poh_node.hash
         )
         
-        # 记录区块指标
-        metrics = BlockMetrics(
-            block_height=block.height,
-            transactions_count=len(transactions),
-            creation_time=time.time() - start_time,
-            confirmation_time=0,  # 将在确认时更新
-            validator=validator
-        )
-        self.performance_monitor.record_block_metrics(metrics)
+        # 添加到区块链和分叉选择器
         self.blockchain.add_block(block)
+        self.fork_choice.add_block(block)
+        
         return block
-
-    async def run(self):
-        """运行共识系统"""
-        while True:
-            # 处理网络消息
-            await self.process_messages()
-            
-            # 如果是当前验证者，创建区块
-            if self.is_current_validator():
-                block = self.create_new_block()
-                self.network.broadcast(
-                    NetworkMessage("NEW_BLOCK", {"block": block})
-                )
-                
-            # 处理分叉
-            self.fork_choice.select_best_chain()
-            
-            # 确认区块
-            self.process_confirmations()
-            
-            await asyncio.sleep(1)
 
 # 使用示例
 def demo_poh_dpos():
@@ -418,6 +413,6 @@ def demo_poh_dpos():
     print(f"Block production successful: {success}")
     print(f"Active validators: {dpos.active_validators}")
     print(f"Current validator: {current_validator}")
-
+    
 if __name__ == "__main__":
     demo_poh_dpos() 

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Optional
 import random
 import time
 import asyncio
@@ -7,6 +7,8 @@ from network import P2PNetwork, NetworkMessage
 from blockchain import Block, Blockchain
 import psutil
 import statistics
+from collections import defaultdict
+from transaction_pool import TransactionPool, Transaction
 
 @dataclass
 class Validator:
@@ -45,17 +47,14 @@ class SystemMetrics:
 class DPOS:
     def __init__(self, 
                  max_validators: int = 21,
-                 block_interval: int = 3,
-                 epoch_blocks: int = 100):
+                 block_interval: float = 0.1):
         """
         初始化 DPOS 系统
         :param max_validators: 最大验证者数量
         :param block_interval: 出块间隔（秒）
-        :param epoch_blocks: 每个周期的区块数
         """
         self.max_validators = max_validators
         self.block_interval = block_interval
-        self.epoch_blocks = epoch_blocks
         
         self.validators: Dict[str, Validator] = {}
         self.votes: List[Vote] = []
@@ -136,12 +135,7 @@ class DPOS:
         获取下一个出块验证者
         """
         current_time = time.time()
-        active_list = list(self.active_validators)
-        
-        if not active_list:
-            return ""
-            
-        # 简单的轮询算法
+        active_list = sorted(list(self.active_validators))
         slot = int(current_time / self.block_interval) % len(active_list)
         return active_list[slot]
 
@@ -270,7 +264,7 @@ class BlockConfirmation:
         return self.is_block_confirmed(block_hash)
         
     def is_block_confirmed(self, block_hash: str) -> bool:
-        """检查区块是否已经得到足够确认"""
+        """检查区块是否已得到足够确认"""
         if block_hash not in self.block_votes:
             return False
             
@@ -287,45 +281,45 @@ class BlockConfirmation:
 
 class PerformanceMonitor:
     def __init__(self):
+        self.metrics = defaultdict(list)
+        self.start_time = time.time()
         self.block_metrics: List[BlockMetrics] = []
         self.system_metrics: List[SystemMetrics] = []
         self.transaction_latencies: List[float] = []
-        self.start_time = time.time()
         
-    def record_block_metrics(self, block_metrics: BlockMetrics):
-        self.block_metrics.append(block_metrics)
+    def record_block_metrics(self, metrics: BlockMetrics):
+        """记录区块性能指标"""
+        self.block_metrics.append(metrics)
         
     def record_transaction_latency(self, latency: float):
+        """记录交易延迟"""
         self.transaction_latencies.append(latency)
         
     def collect_system_metrics(self):
+        """收集系统性能指标"""
         metrics = SystemMetrics(
             cpu_usage=psutil.cpu_percent(),
             memory_usage=psutil.Process().memory_info().rss / 1024 / 1024,  # MB
-            network_io=psutil.net_io_counters()._asdict(),
+            network_io=dict(psutil.net_io_counters()._asdict()),
             timestamp=time.time()
         )
         self.system_metrics.append(metrics)
         
-    def calculate_tps(self) -> float:
-        """计算每秒交易处理量"""
-        total_transactions = sum(m.transactions_count for m in self.block_metrics)
-        total_time = time.time() - self.start_time
-        return total_transactions / total_time if total_time > 0 else 0
-        
-    def get_average_latency(self) -> float:
-        """计算平均交易延迟"""
-        return statistics.mean(self.transaction_latencies) if self.transaction_latencies else 0
-        
     def generate_report(self) -> dict:
         """生成性能报告"""
+        if not self.block_metrics:
+            return {}
+            
+        total_time = time.time() - self.start_time
+        total_transactions = sum(m.transactions_count for m in self.block_metrics)
+        
         return {
-            "tps": self.calculate_tps(),
-            "average_latency": self.get_average_latency(),
-            "avg_cpu_usage": statistics.mean(m.cpu_usage for m in self.system_metrics),
-            "avg_memory_usage": statistics.mean(m.memory_usage for m in self.system_metrics),
+            "tps": total_transactions / total_time if total_time > 0 else 0,
+            "average_latency": statistics.mean(self.transaction_latencies) if self.transaction_latencies else 0,
+            "avg_cpu_usage": statistics.mean(m.cpu_usage for m in self.system_metrics) if self.system_metrics else 0,
+            "avg_memory_usage": statistics.mean(m.memory_usage for m in self.system_metrics) if self.system_metrics else 0,
             "block_count": len(self.block_metrics),
-            "total_transactions": sum(m.transactions_count for m in self.block_metrics)
+            "total_transactions": total_transactions
         }
 
 class ConsensusSystem:
@@ -338,6 +332,7 @@ class ConsensusSystem:
         self.confirmation = BlockConfirmation()
         self.blockchain = Blockchain()
         self.performance_monitor = PerformanceMonitor()
+        self.transaction_pool = TransactionPool()
 
     def create_block(self, validator: str, transactions: List[str]) -> Block:
         """创建新区块"""
@@ -355,7 +350,7 @@ class ConsensusSystem:
             poh_hash=poh_hash
         )
         
-        # 记录区块指标
+        # 录区块指标
         metrics = BlockMetrics(
             block_height=block.height,
             transactions_count=len(transactions),
@@ -380,13 +375,69 @@ class ConsensusSystem:
                     NetworkMessage("NEW_BLOCK", {"block": block})
                 )
                 
-            # 处理分叉
+            # 处分叉
             self.fork_choice.select_best_chain()
             
             # 确认区块
             self.process_confirmations()
             
             await asyncio.sleep(1)
+
+    async def process_transactions(self, transactions: List[str]):
+        # 批量创建交易对象并直接处理
+        txs = [
+            Transaction(
+                tx_id=f"tx_{time.time()}_{hash(tx_data)}",
+                data=tx_data,
+                timestamp=time.time(),
+                gas_price=1.0,
+                size=len(tx_data.encode())
+            )
+            for tx_data in transactions
+        ]
+        
+        # 并行处理交易
+        chunk_size = 5000  # 增加批处理大小
+        tasks = []
+        
+        for i in range(0, len(txs), chunk_size):
+            chunk = txs[i:i + chunk_size]
+            task = asyncio.create_task(self._process_chunk(chunk))
+            tasks.append(task)
+            
+        await asyncio.gather(*tasks)
+        
+        # 记录到POH中 (仅记录交易哈希,不做复杂计算)
+        self.poh.tick(str([tx.tx_id for tx in txs]))
+
+    async def _process_chunk(self, chunk: List[Transaction]):
+        """处理交易批次"""
+        for tx in chunk:
+            # 将交易数据记录到POH中
+            self.poh.tick(tx.data)
+            
+            # 这里可以添加其他交易处理逻辑
+            # 例如: 状态更新、验证等
+            
+        return True
+
+class ProofOfHistory:
+    def __init__(self, difficulty: int = 4):  # 降低难度
+        self.difficulty = difficulty
+        self.history = []
+        self._buffer_size = 1000  # 添加缓冲区
+        self._hash_buffer = {}
+        
+    def _hash(self, previous_hash: str, data: Optional[str] = None) -> str:
+        # 使用缓冲区加速重复哈希计算
+        key = f"{previous_hash}:{data}"
+        if key in self._hash_buffer:
+            return self._hash_buffer[key]
+            
+        result = super()._hash(previous_hash, data)
+        if len(self._hash_buffer) < self._buffer_size:
+            self._hash_buffer[key] = result
+        return result
 
 # 使用示例
 def demo_poh_dpos():
